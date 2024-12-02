@@ -1,0 +1,254 @@
+#include <Wire.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#include <Ps3Controller.h>
+// Define OLED display width and height
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+
+// Define the I2C address for the OLED display
+#define OLED_ADDR 0x3C
+
+// Create display object
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);  // -1 for no reset pin
+
+// Pin definitions
+#define PHOTORESISTOR_1_PIN 14  // Pin for first LM393 module
+#define PHOTORESISTOR_2_PIN 16  // Pin for second LM393 module
+#define LASER_PIN 18            // Define GPIO pin for laser control
+
+// Define motor driver pins
+#define PWMA_PIN 23
+#define AIN2_PIN 19
+#define AIN1_PIN 5
+#define PWMB_PIN 15
+#define BIN2_PIN 2
+#define BIN1_PIN 4 
+// Define PWM Parameters
+const int motorFreq = 1000;
+const int motorResolution = 8;
+
+// Define channels for each motor
+const int motorAChannel = 3;
+const int motorBChannel = 4;
+
+// Fixed speed for movement and turning
+const int moveSpeed = 200;  // Adjust this value for desired movement speed
+const int turnSpeed = 180;  // Adjust this value for desired turning speed
+// Variables for game state
+int val1;
+int val2;
+int score = 0;
+unsigned long lastScoreTime = 0;             // Tracks the last time the score was incremented
+const unsigned long untouchableTime = 2000;  // 2 seconds of untouchable time
+
+// Variables for laser control
+bool laserOn = false; // Laser state (idle by default)
+unsigned long laserOffTime = 0; // Tracks the time to return to idle state
+const unsigned long laserFullPowerTime = 2000; // Laser stays at full power for 2 seconds
+
+// Motor movement function
+void moveMotors(int mtrAspeed, int mtrBspeed, bool mtrdir) {
+  // Set direction pins
+  if (!mtrdir) {
+    // Move in reverse
+    digitalWrite(AIN1_PIN, HIGH);
+    digitalWrite(AIN2_PIN, LOW);
+    digitalWrite(BIN1_PIN, HIGH);
+    digitalWrite(BIN2_PIN, LOW);
+  } else {
+    // Move forward
+    digitalWrite(AIN1_PIN, LOW);
+    digitalWrite(AIN2_PIN, HIGH);
+    digitalWrite(BIN1_PIN, LOW);
+    digitalWrite(BIN2_PIN, HIGH);
+  }
+
+  // Drive motors with PWM
+  ledcWrite(motorAChannel, mtrAspeed);
+  ledcWrite(motorBChannel, mtrBspeed);
+}
+
+// PS3 controller callback function to handle D-pad inputs and shooting
+void notify() {
+  // Detect D-pad inputs for movement
+  if (Ps3.data.button.up) {
+    // Move forward
+    moveMotors(moveSpeed, moveSpeed, true);
+    Serial.println("Moving forward");
+
+  } else if (Ps3.data.button.down) {
+    // Move backward
+    moveMotors(moveSpeed, moveSpeed, false);
+    Serial.println("Moving backward");
+
+  } else if (Ps3.data.button.left) {
+    // Turn left (motor B runs faster, motor A runs slower/reverse)
+    moveMotors(0, moveSpeed, true);
+    Serial.println("Turning left");
+
+  } else if (Ps3.data.button.right) {
+    // Turn right (motor A runs faster, motor B runs slower/reverse)
+    moveMotors(moveSpeed, 0, true);
+    Serial.println("Turning right");
+
+  } else {
+    // Stop motors if no D-pad button is pressed
+    moveMotors(0, 0, true);
+    Serial.println("Stopping");
+  }
+
+  // Detect 'O' button press for shooting
+  if (Ps3.data.button.circle && !laserOn) {
+    // Laser goes to full power for 2 seconds
+    laserOn = true;
+    analogWrite(LASER_PIN, 230); // Full power (3.2V, ~33% duty cycle)
+    Serial.println("Laser at full power");
+    laserOffTime = millis() + laserFullPowerTime; // Set time to return to idle
+  }
+}
+
+// On Connection function
+void onConnect() {
+  // Print to Serial Monitor
+  Serial.println("Connected.");
+}
+
+void setupPS3Controller() {
+  // Define Callback Function
+  Ps3.attach(notify);
+  // Define On Connection Function
+  Ps3.attachOnConnect(onConnect);
+  // Emulate console as specific MAC address (change as required)
+  Ps3.begin("98:43:FA:59:56:AE");
+
+  // Set motor controller pins as outputs
+  pinMode(PWMA_PIN, OUTPUT);
+  pinMode(PWMB_PIN, OUTPUT);
+  pinMode(AIN1_PIN, OUTPUT);
+  pinMode(AIN2_PIN, OUTPUT);
+  pinMode(BIN1_PIN, OUTPUT);
+  pinMode(BIN2_PIN, OUTPUT);
+
+  // Set channel Parameters for each motor
+  ledcSetup(motorAChannel, motorFreq, motorResolution);
+  ledcSetup(motorBChannel, motorFreq, motorResolution);
+
+  // Attach Motor PWM pins to corresponding channels
+  ledcAttachPin(PWMA_PIN, motorAChannel);
+  ledcAttachPin(PWMB_PIN, motorBChannel);
+
+  // Print to Serial Monitor
+  Serial.println("PS3 Controller Ready.");
+}
+
+// Function to initialize the OLED display
+void initDisplay() {
+  // Initialize the OLED display
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;)
+      ;  // Stay here if OLED initialization fails
+  }
+
+  // Clear the display buffer
+  display.clearDisplay();
+
+  // Display initial game message on OLED
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(15, 2);
+  display.println("Shooting Game");
+  display.display();  // Show on screen
+  delay(2000);        // Wait for 2 seconds before starting the game
+}
+
+// Function to read photoresistor values
+void readPhotoresistors() {
+  val1 = digitalRead(PHOTORESISTOR_1_PIN);
+  val2 = digitalRead(PHOTORESISTOR_2_PIN);
+}
+
+// Function to update the game state
+void updateGameState() {
+  unsigned long currentTime = millis();
+
+  // Check if enough time has passed since the last score increment
+  if (currentTime - lastScoreTime > untouchableTime) {
+    // Check if either photoresistor detects the laser (active low, so value is 0)
+    if (val1 == 0 || val2 == 0) {
+      score++;                      // Increment score
+      lastScoreTime = currentTime;  // Reset untouchable timer
+    }
+  }
+}
+
+// Function to update the display
+void updateDisplay() {
+  if (score > 50) {
+    // Display game over message if score exceeds 50
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(0, 18);
+    display.println("YOU LOSE");
+    display.display();  // Show "YOU LOSE" on screen
+  } else {
+    // Clear the display and show the current score
+    display.clearDisplay();
+    display.setTextSize(6);
+    display.setCursor(28, 13);
+    display.println(score);
+    display.display();  // Show score on screen
+  }
+}
+
+// Function to control the laser shooting
+void controlLaser() {
+  unsigned long currentTime = millis();
+  
+  if (laserOn && currentTime >= laserOffTime) {
+    // Return laser to idle state after 2 seconds
+    laserOn = false;
+    analogWrite(LASER_PIN, 30); // Idle mode (2.3V, 25% duty cycle)
+    Serial.println("Laser returned to idle state");
+  }
+}
+
+// Setup function for initializing components
+void setup() {
+  // Set pin modes
+  pinMode(PHOTORESISTOR_1_PIN, INPUT);
+  pinMode(PHOTORESISTOR_2_PIN, INPUT);
+  pinMode(LASER_PIN, OUTPUT);
+
+  // Start serial communication for debugging
+  Serial.begin(115200);
+
+  // Initialize the OLED display
+  initDisplay();
+  setupPS3Controller();  // PS3 controller setup with D-pad functionality
+
+  // Set laser to idle mode initially
+  analogWrite(LASER_PIN, 30); // Idle mode (2.3V, 25% duty cycle)
+}
+
+// Main loop function
+void loop() {
+  if (!Ps3.isConnected())
+    return;
+
+  // Read inputs
+  readPhotoresistors();
+
+  // Update game state
+  updateGameState();
+
+  // Update the display
+  updateDisplay();
+
+  // Control the laser shooting state
+  controlLaser();
+
+  // Small delay to reduce CPU load (not for debouncing)
+  delay(10);
+}
